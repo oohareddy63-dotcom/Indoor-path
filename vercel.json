@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "buildCommand": "pnpm install --config.minimum-release-age=0 && pnpm build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/server/app.js" }
+  ],
+  "functions": {
+    "server/app.js": {
+      "runtime": "nodejs20.x",
+      "maxDuration": 30
+    }
+  }
+}
