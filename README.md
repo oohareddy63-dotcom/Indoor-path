@@ -22,19 +22,12 @@
 - [Database Schema](#database-schema)
 - [Pathfinding Algorithm](#pathfinding-algorithm)
 - [Pages & Functionality](#pages--functionality)
-- [Screenshots](#screenshots)
 
 ---
 
 ## Live Demo
 
-| Service   | URL                        |
-|-----------|----------------------------|
-| Frontend  | http://localhost:8443       |
-| Backend   | http://localhost:3001       |
-| Health    | http://localhost:3001/api/health |
 
----
 
 ## Tech Stack
 
