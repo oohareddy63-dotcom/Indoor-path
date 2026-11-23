@@ -1,4 +1,9 @@
-import { edges, nodes, type HospitalEdge } from "./data";
+import {
+  edges as staticEdges,
+  nodes as staticNodes,
+  type HospitalEdge,
+  type HospitalNode,
+} from "./data";
 
 export interface RouteResult {
   nodeIds: string[];
@@ -6,60 +11,82 @@ export interface RouteResult {
   distance: number;
 }
 
-const nodeById = new Map(nodes.map((node) => [node.id, node]));
+export interface PathfindingOptions {
+  accessible?: boolean;
+  blockedEdges?: Set<string>;
+  avoidEdges?: Set<string>;
+}
 
-function heuristic(from: string, to: string) {
+function heuristic(
+  from: string,
+  to: string,
+  nodeById: Map<string, HospitalNode>,
+): number {
   const a = nodeById.get(from);
   const b = nodeById.get(to);
   if (!a || !b) return 0;
-  return Math.abs(a.x - b.x) * 0.12 + Math.abs(a.y - b.y) * 0.12 + Math.abs(a.floor - b.floor) * 8;
+  return (
+    Math.abs(a.x - b.x) * 0.12 +
+    Math.abs(a.y - b.y) * 0.12 +
+    Math.abs(a.floor - b.floor) * 8
+  );
 }
 
 export function findRoute(
   start: string,
   goal: string,
-  options: { accessible?: boolean; blockedEdges?: Set<string>; avoidEdges?: Set<string> } = {},
+  options: PathfindingOptions = {},
+  liveEdges?: HospitalEdge[],
+  liveNodes?: HospitalNode[],
 ): RouteResult | null {
+  const edgeList = liveEdges && liveEdges.length ? liveEdges : staticEdges;
+  const nodeList = liveNodes && liveNodes.length ? liveNodes : staticNodes;
+  const nodeById = new Map(nodeList.map((n) => [n.id, n]));
+
   const blocked = options.blockedEdges ?? new Set<string>();
   const avoided = options.avoidEdges ?? new Set<string>();
+
   const open = new Set([start]);
   const cameFrom = new Map<string, { node: string; edge: HospitalEdge }>();
   const g = new Map<string, number>([[start, 0]]);
-  const f = new Map<string, number>([[start, heuristic(start, goal)]]);
+  const f = new Map<string, number>([[start, heuristic(start, goal, nodeById)]]);
 
   while (open.size) {
-    const current = [...open].reduce((best, id) => (f.get(id)! < f.get(best)! ? id : best));
+    const current = [...open].reduce((best, id) =>
+      (f.get(id) ?? Infinity) < (f.get(best) ?? Infinity) ? id : best,
+    );
+
     if (current === goal) {
-      const nodeIds = [current];
+      const nodeIds: string[] = [current];
       const routeEdges: HospitalEdge[] = [];
       let cursor = current;
       while (cameFrom.has(cursor)) {
-        const previous = cameFrom.get(cursor)!;
-        routeEdges.unshift(previous.edge);
-        nodeIds.unshift(previous.node);
-        cursor = previous.node;
+        const prev = cameFrom.get(cursor)!;
+        routeEdges.unshift(prev.edge);
+        nodeIds.unshift(prev.node);
+        cursor = prev.node;
       }
       return { nodeIds, edges: routeEdges, distance: Math.round(g.get(goal) ?? 0) };
     }
 
     open.delete(current);
-    for (const routeEdge of edges) {
-      if (blocked.has(routeEdge.id) || (options.accessible && !routeEdge.accessible)) continue;
+
+    for (const edge of edgeList) {
+      if (blocked.has(edge.id)) continue;
+      if (options.accessible && !edge.accessible) continue;
+
       const neighbor =
-        routeEdge.from === current
-          ? routeEdge.to
-          : routeEdge.to === current
-            ? routeEdge.from
-            : null;
+        edge.from === current ? edge.to : edge.to === current ? edge.from : null;
       if (!neighbor) continue;
-      const accessibleBias = options.accessible && routeEdge.type === "lift" ? -2 : 0;
-      const avoidPenalty = avoided.has(routeEdge.id) ? 60 : 0;
-      const tentative =
-        (g.get(current) ?? Infinity) + routeEdge.distance + accessibleBias + avoidPenalty;
+
+      const liftBias   = options.accessible && edge.type === "lift" ? -2 : 0;
+      const avoidExtra = avoided.has(edge.id) ? 60 : 0;
+      const tentative  = (g.get(current) ?? Infinity) + edge.distance + liftBias + avoidExtra;
+
       if (tentative < (g.get(neighbor) ?? Infinity)) {
-        cameFrom.set(neighbor, { node: current, edge: routeEdge });
+        cameFrom.set(neighbor, { node: current, edge });
         g.set(neighbor, tentative);
-        f.set(neighbor, tentative + heuristic(neighbor, goal));
+        f.set(neighbor, tentative + heuristic(neighbor, goal, nodeById));
         open.add(neighbor);
       }
     }
@@ -73,10 +100,18 @@ export function findAlternative(
   current: RouteResult,
   accessible = false,
   blockedEdges = new Set<string>(),
-) {
-  const mostSignificant = [...current.edges]
-    .sort((a, b) => b.distance - a.distance)
-    .slice(0, 2)
-    .map((routeEdge) => routeEdge.id);
-  return findRoute(start, goal, { accessible, blockedEdges, avoidEdges: new Set(mostSignificant) });
+  liveEdges?: HospitalEdge[],
+  liveNodes?: HospitalNode[],
+): RouteResult | null {
+  const avoidEdges = new Set(
+    [...current.edges]
+      .sort((a, b) => b.distance - a.distance)
+      .slice(0, 2)
+      .map((e) => e.id),
+  );
+  return findRoute(
+    start, goal,
+    { accessible, blockedEdges, avoidEdges },
+    liveEdges, liveNodes,
+  );
 }

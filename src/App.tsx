@@ -47,15 +47,28 @@ import i18n from "i18next";
 import { initReactI18next, useTranslation } from "react-i18next";
 import QRCode from "qrcode";
 import {
-  edges,
   floorNames,
   initialDepartments,
-  nodes,
-  qrLocations,
+  nodes as staticNodes,
+  edges as staticEdges,
+  qrLocations as staticQrLocations,
   type Department,
   type FloorId,
+  type HospitalNode,
+  type HospitalEdge,
 } from "./data";
 import { findAlternative, findRoute, type RouteResult } from "./pathfinding";
+import {
+  getDepartments,
+  getNodes,
+  getEdges,
+  getQrLocations,
+  createDepartment,
+  updateDepartment as apiUpdateDepartment,
+  deleteDepartment as apiDeleteDepartment,
+  blockEdge as apiBlockEdge,
+  type QrLocation,
+} from "./api";
 
 const Hospital3D = lazy(() => import("./Hospital3D"));
 
@@ -182,6 +195,9 @@ interface AppState {
   setBlockedEdges: (value: Set<string>) => void;
   departments: Department[];
   setDepartments: (value: Department[]) => void;
+  liveNodes: HospitalNode[];
+  liveEdges: HospitalEdge[];
+  liveQrLocations: QrLocation[];
   route: RouteResult | null;
   calculateRoute: (
     alternate?: boolean,
@@ -190,6 +206,7 @@ interface AppState {
   voice: boolean;
   setVoice: (value: boolean) => void;
   notify: (message: string) => void;
+  apiReady: boolean;
 }
 
 function Toggle({
@@ -359,7 +376,7 @@ function Dashboard({ state }: { state: AppState }) {
               <span className="dot start" />
               <div>
                 <small>YOUR LOCATION</small>
-                <strong>{nodes.find((node) => node.id === state.currentLocation)?.label}</strong>
+                <strong>{state.liveNodes.find((node) => node.id === state.currentLocation)?.label}</strong>
               </div>
             </div>
             <div className="route-line" />
@@ -411,16 +428,18 @@ function FloorMap({
   route,
   destination,
   currentLocation,
+  liveNodes,
 }: {
   floor: FloorId;
   route: RouteResult | null;
   destination: Department;
   currentLocation: string;
+  liveNodes: HospitalNode[];
 }) {
-  const floorNodes = nodes.filter((node) => node.floor === floor);
+  const floorNodes = liveNodes.filter((node) => node.floor === floor);
   const routeNodes =
     route?.nodeIds
-      .map((id) => nodes.find((node) => node.id === id))
+      .map((id) => liveNodes.find((node) => node.id === id))
       .filter((node) => node?.floor === floor) ?? [];
   const path = routeNodes
     .map((node, index) => `${index ? "L" : "M"} ${node!.x} ${node!.y}`)
@@ -555,6 +574,7 @@ function Explore({ state }: { state: AppState }) {
                   route={state.route}
                   destination={state.destination}
                   currentLocation={state.currentLocation}
+                  liveNodes={state.liveNodes}
                 />
               </div>
               <div className="absolute bottom-4 right-4 flex gap-2">
@@ -713,11 +733,11 @@ function Departments({ state }: { state: AppState }) {
   );
 }
 
-function directionsFor(route: RouteResult | null) {
+function directionsFor(route: RouteResult | null, liveNodes: HospitalNode[]) {
   if (!route) return [];
   return route.edges.map((edge, index) => {
-    const from = nodes.find((node) => node.id === route.nodeIds[index])!;
-    const to = nodes.find((node) => node.id === route.nodeIds[index + 1])!;
+    const from = liveNodes.find((node) => node.id === route.nodeIds[index])!;
+    const to = liveNodes.find((node) => node.id === route.nodeIds[index + 1])!;
     if (edge.type === "lift") return `Take the lift to ${floorLabel(to.floor)}.`;
     if (edge.type === "stairs") return `Use the stairs to ${floorLabel(to.floor)}.`;
     if (index === route.edges.length - 1)
@@ -729,8 +749,8 @@ function directionsFor(route: RouteResult | null) {
 function NavigationPage({ state }: { state: AppState }) {
   const [mapFloor, setMapFloor] = useState<FloorId>(0);
   const [showAlternative, setShowAlternative] = useState(false);
-  const directions = directionsFor(state.route);
-  const currentNode = nodes.find((node) => node.id === state.currentLocation)!;
+  const directions = directionsFor(state.route, state.liveNodes);
+  const currentNode = state.liveNodes.find((node) => node.id === state.currentLocation)!;
   const speak = () => {
     if (!("speechSynthesis" in window))
       return state.notify("Voice guidance is not available in this browser.");
@@ -742,8 +762,8 @@ function NavigationPage({ state }: { state: AppState }) {
   }, [state.route]); // eslint-disable-line react-hooks/exhaustive-deps
   const routeFloors = [
     ...new Set(
-      state.route?.nodeIds.map((id) => nodes.find((node) => node.id === id)?.floor) ?? [
-        currentNode.floor,
+      state.route?.nodeIds.map((id) => state.liveNodes.find((node) => node.id === id)?.floor) ?? [
+        currentNode?.floor ?? 0,
       ],
     ),
   ] as FloorId[];
@@ -766,7 +786,7 @@ function NavigationPage({ state }: { state: AppState }) {
             value={state.currentLocation}
             onChange={(event) => state.setCurrentLocation(event.target.value)}
           >
-            {qrLocations.map((location) => (
+            {state.liveQrLocations.map((location) => (
               <option key={location.nodeId} value={location.nodeId}>
                 {location.label}
               </option>
@@ -829,6 +849,7 @@ function NavigationPage({ state }: { state: AppState }) {
               route={state.route}
               destination={state.destination}
               currentLocation={state.currentLocation}
+              liveNodes={state.liveNodes}
             />
             <div className="absolute left-4 top-4 flex gap-2">
               {([0, 1, 2] as FloorId[]).map((floor) => (
@@ -903,6 +924,8 @@ function NavigationPage({ state }: { state: AppState }) {
                         state.route,
                         state.accessible,
                         state.blockedEdges,
+                        state.liveEdges.length ? state.liveEdges : undefined,
+                        state.liveNodes.length ? state.liveNodes : undefined,
                       );
                     if (alt) {
                       setShowAlternative(true);
@@ -941,7 +964,7 @@ function Scanner({ state }: { state: AppState }) {
   const [result, setResult] = useState<string | null>(null);
   const scannerRef = useRef<{ stop: () => Promise<void> } | null>(null);
   const identify = (code: string) => {
-    const match = qrLocations.find((location) => location.code === code);
+    const match = state.liveQrLocations.find((location) => location.code === code);
     if (!match) return state.notify("This QR code is not registered with MediPath.");
     state.setCurrentLocation(match.nodeId);
     setResult(match.label);
@@ -1031,7 +1054,7 @@ function Scanner({ state }: { state: AppState }) {
             Use a sample code for a camera-free demonstration.
           </p>
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            {qrLocations.map((location) => (
+            {state.liveQrLocations.map((location) => (
               <DemoQr
                 key={location.code}
                 code={location.code}
@@ -1050,7 +1073,7 @@ function Scanner({ state }: { state: AppState }) {
               <option value="" disabled>
                 Select your current location
               </option>
-              {qrLocations.map((location) => (
+              {state.liveQrLocations.map((location) => (
                 <option value={location.code} key={location.code}>
                   {location.label} · {floorLabel(location.floor)}
                 </option>
@@ -1235,27 +1258,48 @@ function Admin({ state }: { state: AppState }) {
     );
     setShowForm(true);
   };
-  const save = () => {
+  const save = async () => {
     if (!draft.name || !draft.room) return state.notify("Department name and room are required.");
-    if (editing)
-      state.setDepartments(
-        state.departments.map((item) => (item.id === editing.id ? { ...item, ...draft } : item)),
-      );
-    else {
+    if (editing) {
+      try {
+        const updated = await apiUpdateDepartment(editing.id, draft);
+        state.setDepartments(state.departments.map((item) => (item.id === editing.id ? updated : item)));
+        state.notify("Department updated.");
+      } catch (err: any) {
+        // Fallback to local update if API unavailable
+        state.setDepartments(state.departments.map((item) => (item.id === editing.id ? { ...item, ...draft } : item)));
+        state.notify("Department updated (offline).");
+      }
+    } else {
       const id = `custom-${Date.now()}`;
-      state.setDepartments([
-        ...state.departments,
-        { id, nodeId: "reception", color: "#1769FF", ...draft },
-      ]);
+      try {
+        const created = await createDepartment({ id, color: "#1769FF", node_id: "reception", ...draft });
+        state.setDepartments([...state.departments, created]);
+        state.notify("Department added.");
+      } catch {
+        state.setDepartments([...state.departments, { id, nodeId: "reception", color: "#1769FF", ...draft }]);
+        state.notify("Department added (offline).");
+      }
     }
     setShowForm(false);
-    state.notify(editing ? "Department updated." : "Department added.");
   };
-  const toggleEdge = (id: string) => {
+  const removeDepartment = async (id: string) => {
+    if (state.departments.length <= 1) return;
+    try {
+      await apiDeleteDepartment(id);
+    } catch {
+      // fall through — remove from local state regardless
+    }
+    state.setDepartments(state.departments.filter((item) => item.id !== id));
+    state.notify("Department removed.");
+  };
+  const toggleEdge = async (id: string) => {
     const next = new Set(state.blockedEdges);
     const blocking = !next.has(id);
     blocking ? next.add(id) : next.delete(id);
     state.setBlockedEdges(next);
+    // Sync with backend
+    try { await apiBlockEdge(id, blocking); } catch { /* offline */ }
     if (blocking && state.route?.edges.some((edge) => edge.id === id)) {
       state.calculateRoute(true, { blockedEdges: next });
       state.notify("Your current route is unavailable. An alternative route has been calculated.");
@@ -1278,7 +1322,7 @@ function Admin({ state }: { state: AppState }) {
           ["7", "Registered locations", MapPin],
           [String(state.departments.length), "Departments", Building2],
           [String(state.blockedEdges.size), "Unavailable paths", DoorOpen],
-          ["5", "Active QR codes", QrCode],
+          [state.apiReady ? "LIVE" : "LOCAL", state.apiReady ? "API connected" : "Offline mode", QrCode],
         ].map(([value, label, Icon]) => (
           <div key={String(label)} className="admin-stat">
             <span>
@@ -1319,16 +1363,12 @@ function Admin({ state }: { state: AppState }) {
                     <td>{floorLabel(department.floor)}</td>
                     <td>{department.room}</td>
                     <td>
-                      <button onClick={() => openEdit(department)}>
+                      <button
+                        onClick={() => openEdit(department)}>
                         <Edit3 size={15} />
                       </button>
                       <button
-                        onClick={() => {
-                          if (state.departments.length > 1)
-                            state.setDepartments(
-                              state.departments.filter((item) => item.id !== department.id),
-                            );
-                        }}
+                        onClick={() => removeDepartment(department.id)}
                       >
                         <Trash2 size={15} />
                       </button>
@@ -1350,7 +1390,7 @@ function Admin({ state }: { state: AppState }) {
             </span>
           </div>
           <div className="mt-4 space-y-3">
-            {edges
+            {state.liveEdges
               .filter((edge) => edge.type === "lift" || edge.id.includes("corridor"))
               .slice(0, 6)
               .map((edge) => (
@@ -1364,7 +1404,7 @@ function Admin({ state }: { state: AppState }) {
                         ? edge.id.startsWith("east")
                           ? "East lift"
                           : "West lift"
-                        : edge.id.replaceAll("-", " ")}
+                        : edge.id.replace(/-/g, " ")}
                     </strong>
                     <small>
                       {edge.from} → {edge.to}
@@ -1474,14 +1514,51 @@ export default function App() {
     alternate = false,
     overrides?: { accessible?: boolean; blockedEdges?: Set<string> },
   ) => {
-    const result = findRoute(currentLocation, destination.nodeId, {
-      accessible: overrides?.accessible ?? accessible,
-      blockedEdges: overrides?.blockedEdges ?? blockedEdges,
-    });
+    const result = findRoute(
+      currentLocation,
+      destination.nodeId,
+      {
+        accessible: overrides?.accessible ?? accessible,
+        blockedEdges: overrides?.blockedEdges ?? blockedEdges,
+      },
+      liveEdges.length ? liveEdges : undefined,
+      liveNodes.length ? liveNodes : undefined,
+    );
     setRoute(result);
     if (!result) notify("No available route. Please contact reception for assistance.");
     else if (alternate) notify("An alternative route has been calculated.");
   };
+
+  // Live data from backend API
+  const [liveNodes, setLiveNodes] = useState<HospitalNode[]>(staticNodes);
+  const [liveEdges, setLiveEdges] = useState<HospitalEdge[]>(staticEdges);
+  const [liveQrLocations, setLiveQrLocations] = useState<QrLocation[]>(staticQrLocations);
+  const [apiReady, setApiReady] = useState(false);
+
+  useEffect(() => {
+    // Load all data from backend; fall back to static data on error
+    Promise.all([
+      getDepartments(),
+      getNodes(),
+      getEdges(),
+      getQrLocations(),
+    ])
+      .then(([depts, nodes, edgesData, qrLocs]) => {
+        setDepartments(depts);
+        const dest = depts.find((d) => d.id === "cardiology") ?? depts[0];
+        if (dest) setDestination(dest);
+        setLiveNodes(nodes);
+        // Strip the extra "blocked" field when storing edges for pathfinding
+        setLiveEdges(edgesData.map(({ blocked: _b, ...e }) => e));
+        setLiveQrLocations(qrLocs);
+        setApiReady(true);
+        notify("Connected to MediPath backend.");
+      })
+      .catch(() => {
+        // Backend not reachable — silently continue with static data
+        setApiReady(false);
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const state: AppState = {
     page,
     setPage,
@@ -1495,11 +1572,15 @@ export default function App() {
     setBlockedEdges,
     departments,
     setDepartments,
+    liveNodes,
+    liveEdges,
+    liveQrLocations,
     route,
     calculateRoute,
     voice,
     setVoice,
     notify,
+    apiReady,
   };
   const currentPage = useMemo(() => {
     switch (page) {
@@ -1520,7 +1601,7 @@ export default function App() {
       default:
         return <Dashboard state={state} />;
     }
-  }, [page, currentLocation, destination, accessible, blockedEdges, departments, route, voice]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [page, currentLocation, destination, accessible, blockedEdges, departments, liveNodes, liveEdges, liveQrLocations, route, voice]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="min-h-screen bg-[#F4F8FF] text-[#102A56]">
       <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
@@ -1548,10 +1629,10 @@ export default function App() {
         </nav>
         <div className="m-4 rounded-2xl bg-[#EAF2FF] p-4">
           <div className="flex items-center gap-2 text-xs font-extrabold text-[#1769FF]">
-            <ShieldCheck size={16} /> Navigation online
+            <ShieldCheck size={16} /> {state.apiReady ? "MongoDB Connected" : "Navigation online"}
           </div>
           <p className="mt-2 text-[10px] leading-4 text-[#6681A2]">
-            All three floors mapped and ready.
+            {state.apiReady ? "Live data from Atlas database." : "All three floors mapped and ready."}
           </p>
         </div>
         <div className="border-t border-[#E4ECF6] p-4">
