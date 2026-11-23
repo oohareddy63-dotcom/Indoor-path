@@ -6,7 +6,6 @@
 
 ## Table of Contents
 
-- [Live Demo](#live-demo)
 - [Tech Stack](#tech-stack)
 - [Features](#features)
 - [Architecture](#architecture)
