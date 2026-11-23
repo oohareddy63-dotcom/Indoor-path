@@ -1,0 +1,10 @@
+{
+  "description": "Helps hospital patients, visitors, and staff find departments with interactive indoor maps, accessible multi-floor directions, and QR-based location guidance.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
